@@ -1,5 +1,4 @@
-# Skripsi
-source code fuzzy electrocoagulation
+# SKRIPSI_FT_UNNES_2020
 this is the code to run my prototype of wastewater treatment using electrocoagulation, 
 controlled by arduino 2560 and using fuzzy mamdani from eFFL
 to use this program, you need to install library of:
