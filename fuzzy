@@ -1,0 +1,676 @@
+#include <Fuzzy.h>
+#include <FuzzyComposition.h>
+#include <FuzzyInput.h>
+#include <FuzzyIO.h>
+#include <FuzzyOutput.h>
+#include <FuzzyRule.h>
+#include <FuzzyRuleAntecedent.h>
+#include <FuzzyRuleConsequent.h>
+#include <FuzzySet.h>
+#include <Wire.h>
+#include "RTClib.h"
+RTC_DS1307 rtc;
+#include <LiquidCrystal_I2C.h>
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+#include <Servo.h>
+Servo myservo;
+
+uint8_t k [8] = {0x0, 0x1D, 0x1F, 0x13, 0x11, 0x11, 0x1F, 0x0};
+uint8_t p [8] = {0x0, 0x1c, 0x1c, 0x10, 0x15, 0x7, 0x5, 0x0};
+uint8_t d [8] = {0x0, 0xe, 0x15, 0x17, 0x11, 0xe, 0x0};
+
+int x=500;    //delay
+int pos = 0;  //posisi servo
+
+//sensor
+int ptb=A1, pta=A2;    //photodioda bawah(kekeruhan), atas(tinggi air)
+int kepekatan, keasaman, durasi, Tair;
+
+//aktuator                       
+int tx1=2;             //led atas
+int ntx1=500;          //nilai awal sebelum limbah disedot
+
+int tx2=3;             //led bawah
+int ntx2=500;          //nilai cahaya awal
+
+int rpsu=4;            //relay psu
+int pompa=5;           //pompa 
+
+int rkran=9;           //relay kran
+
+//SENSOR pH
+#define SensorPin A0            //pH meter Analog output to Arduino Analog Input 0
+#define Offset 0.16             //deviation compensate
+#define LED 13
+#define samplingInterval 20
+#define printInterval 800
+#define ArrayLenth  40    //times of collection
+int pHArray[ArrayLenth];   //Store the average value of the sensor feedback
+int pHArrayIndex=0;
+int sensor;
+  static unsigned long samplingTime = millis();
+  static unsigned long printTime = millis();
+  static float pHValue,voltage;
+
+//Fuzzy Input
+Fuzzy* fuzzy = new Fuzzy();
+
+//kepekatan photodioda
+FuzzySet* bening      = new FuzzySet(0,     200.6, 200.6, 401.2); 
+FuzzySet* pekat       = new FuzzySet(341,   511.5, 511.5, 682);
+FuzzySet* sangatpekat = new FuzzySet(621.8, 822.4, 822.4, 1023);
+
+//keasaman pH
+FuzzySet* optimal     = new FuzzySet(0,   69.75, 69.75, 139.5);
+FuzzySet* rendah      = new FuzzySet(93,  325.5, 325.5, 604.5);
+FuzzySet* tinggi      = new FuzzySet(558, 790.5, 790.5, 1023);
+
+//durasi rtc
+FuzzySet* cepat       = new FuzzySet(0,     255.8, 255.8, 511.5);
+FuzzySet* pas         = new FuzzySet(255.8, 511.5, 511.5, 767.3);
+FuzzySet* lama        = new FuzzySet(511.5, 767.3, 767.3, 1023);
+
+//Fuzzy Output kondisi
+FuzzySet* proses = new FuzzySet(0    , 255.8, 255.8, 511.5);
+FuzzySet* buang  = new FuzzySet(511.5, 767.3, 767.3, 1023);
+
+void setup () {
+  Serial.begin(9600);
+  lcd.begin(); lcd.backlight(); lcd.setBacklight(HIGH);
+  lcd.createChar(1, k);lcd.createChar(2, p);lcd.createChar(3, d);
+  
+  //POMPA, RELAY PSU, RELAY KRAN, TX1, TX2, SERVO, pH
+  pinMode(pompa, OUTPUT); 
+  pinMode(rpsu, OUTPUT); digitalWrite(rpsu, HIGH); //pada rpsu high=mati
+  pinMode(rkran, OUTPUT);
+  pinMode(tx1, OUTPUT); digitalWrite(tx1, HIGH);
+  pinMode(tx2, OUTPUT); digitalWrite(tx2, HIGH);
+  myservo.attach(9); myservo.write(85);
+  pinMode(LED,OUTPUT);  
+  
+  //RTC, A5=SCL, A4=SDA
+  if (! rtc.begin()) {Serial.println("RTC TIDAK TERBACA");while (1);}
+  if (! rtc.isrunning()) {Serial.println("RTC is NOT running!");
+      rtc.adjust(DateTime(2019, 5, 19, 0, 0, 0)); /*set waktu manual*/}
+      
+  // FuzzyInput kepekatan photodioda
+  FuzzyInput* kepekatan = new FuzzyInput(1);
+  kepekatan->addFuzzySet(sangatpekat);
+  kepekatan->addFuzzySet(pekat);
+  kepekatan->addFuzzySet(bening);
+  fuzzy->addFuzzyInput(kepekatan);
+  
+  // FuzzyInput keasaman pH
+  FuzzyInput* keasaman = new FuzzyInput(2);
+  keasaman->addFuzzySet(optimal);
+  keasaman->addFuzzySet(rendah);
+  keasaman->addFuzzySet(tinggi);
+  fuzzy->addFuzzyInput(keasaman);
+  
+  // FuzzyInput durasi rtc
+  FuzzyInput* durasi = new FuzzyInput(3);
+  durasi->addFuzzySet(cepat);
+  durasi->addFuzzySet(pas);
+  durasi->addFuzzySet(lama);
+  fuzzy->addFuzzyInput(durasi);
+
+  //FuzzyOutput Kondisi
+  FuzzyOutput* kondisi = new FuzzyOutput(1);
+  FuzzySet* proses  = new FuzzySet(0    , 255.8, 255.8, 511.5);
+  kondisi->addFuzzySet(proses);
+  FuzzySet* buang   = new FuzzySet(511.5, 767.3, 767.3, 1023);
+  kondisi->addFuzzySet(buang);
+  fuzzy->addFuzzyOutput(kondisi);
+  
+//FuzzyRule
+//rulebase 1
+  FuzzyRuleAntecedent* kepekatanSangatpekatAndkeasamanTinggi = new FuzzyRuleAntecedent();
+  kepekatanSangatpekatAndkeasamanTinggi->joinWithAND(sangatpekat, tinggi);
+
+  FuzzyRuleAntecedent* ifkepekatanSangatpekatAndkeasamanTinggiAnddurasiCepat = new FuzzyRuleAntecedent();
+  ifkepekatanSangatpekatAndkeasamanTinggiAnddurasiCepat->joinWithAND(kepekatanSangatpekatAndkeasamanTinggi, cepat);
+  
+  FuzzyRuleConsequent* thenKondisiProses = new FuzzyRuleConsequent();
+  thenKondisiProses->addOutput(proses);
+
+  FuzzyRule* fuzzyRule1 = new FuzzyRule(1,  ifkepekatanSangatpekatAndkeasamanTinggiAnddurasiCepat, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule1);
+  
+//rulebase 2
+  FuzzyRuleAntecedent* kepekatanSangatpekatAndkeasamanTinggi1 = new FuzzyRuleAntecedent();
+  kepekatanSangatpekatAndkeasamanTinggi1->joinWithAND(sangatpekat, tinggi);
+
+  FuzzyRuleAntecedent* ifkepekatanSangatpekatAndkeasamanTinggiAnddurasiPas = new FuzzyRuleAntecedent();
+  ifkepekatanSangatpekatAndkeasamanTinggiAnddurasiPas->joinWithAND(kepekatanSangatpekatAndkeasamanTinggi1, pas);
+  
+  FuzzyRuleConsequent* thenKondisiProses1 = new FuzzyRuleConsequent();
+  thenKondisiProses1->addOutput(proses);
+
+  FuzzyRule* fuzzyRule2 = new FuzzyRule(2,  ifkepekatanSangatpekatAndkeasamanTinggiAnddurasiPas, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule2);
+
+//rulebase 3
+  FuzzyRuleAntecedent* kepekatanSangatpekatAndkeasamanTinggi2 = new FuzzyRuleAntecedent();
+  kepekatanSangatpekatAndkeasamanTinggi2->joinWithAND(sangatpekat, tinggi);
+
+  FuzzyRuleAntecedent* ifkepekatanSangatpekatAndkeasamanTinggiAnddurasiLama = new FuzzyRuleAntecedent();
+  ifkepekatanSangatpekatAndkeasamanTinggiAnddurasiLama->joinWithAND(kepekatanSangatpekatAndkeasamanTinggi2, lama);
+  
+  FuzzyRuleConsequent* thenKondisiProses2 = new FuzzyRuleConsequent();
+  thenKondisiProses2->addOutput(proses);
+
+  FuzzyRule* fuzzyRule3 = new FuzzyRule(3,  ifkepekatanSangatpekatAndkeasamanTinggiAnddurasiLama, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule3);
+
+//rulebase 4
+  FuzzyRuleAntecedent* kepekatanSangatpekatAndkeasamanRendah = new FuzzyRuleAntecedent();
+  kepekatanSangatpekatAndkeasamanRendah->joinWithAND(sangatpekat, rendah);
+  
+  FuzzyRuleAntecedent* ifkepekatanSangatpekatAndkeasamanRendahAnddurasiCepat = new FuzzyRuleAntecedent();
+  ifkepekatanSangatpekatAndkeasamanRendahAnddurasiCepat->joinWithAND(kepekatanSangatpekatAndkeasamanRendah, cepat);
+  
+  FuzzyRuleConsequent* thenKondisiProses3 = new FuzzyRuleConsequent();
+  thenKondisiProses3->addOutput(proses);
+
+  FuzzyRule* fuzzyRule4 = new FuzzyRule(4,  ifkepekatanSangatpekatAndkeasamanRendahAnddurasiCepat, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule4);
+  
+//rulebase 5
+  FuzzyRuleAntecedent* kepekatanSangatpekatAndkeasamanRendah1 = new FuzzyRuleAntecedent();
+  kepekatanSangatpekatAndkeasamanRendah1->joinWithAND(sangatpekat, rendah);
+
+  FuzzyRuleAntecedent* ifkepekatanSangatpekatAndkeasamanRendahAnddurasiPas = new FuzzyRuleAntecedent();
+  ifkepekatanSangatpekatAndkeasamanRendahAnddurasiPas->joinWithAND(kepekatanSangatpekatAndkeasamanRendah1, pas);
+  
+  FuzzyRuleConsequent* thenKondisiProses4 = new FuzzyRuleConsequent();
+  thenKondisiProses4->addOutput(proses);
+
+  FuzzyRule* fuzzyRule5 = new FuzzyRule(5,  ifkepekatanSangatpekatAndkeasamanRendahAnddurasiPas, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule5);
+
+//rulebase 6
+  FuzzyRuleAntecedent* kepekatanSangatpekatAndkeasamanRendah2 = new FuzzyRuleAntecedent();
+  kepekatanSangatpekatAndkeasamanRendah2->joinWithAND(sangatpekat, rendah);
+
+  FuzzyRuleAntecedent* ifkepekatanSangatpekatAndkeasamanRendahAnddurasiLama = new FuzzyRuleAntecedent();
+  ifkepekatanSangatpekatAndkeasamanRendahAnddurasiLama->joinWithAND(kepekatanSangatpekatAndkeasamanRendah2, lama);
+  
+  FuzzyRuleConsequent* thenKondisiProses5 = new FuzzyRuleConsequent();
+  thenKondisiProses5->addOutput(proses);
+
+  FuzzyRule* fuzzyRule6 = new FuzzyRule(6,  ifkepekatanSangatpekatAndkeasamanRendahAnddurasiLama, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule6);
+
+//rulebase 7
+  FuzzyRuleAntecedent* kepekatanSangatpekatAndkeasamanOptimal = new FuzzyRuleAntecedent();
+  kepekatanSangatpekatAndkeasamanOptimal->joinWithAND(sangatpekat, optimal);
+
+  FuzzyRuleAntecedent* ifkepekatanSangatpekatAndkeasamanOptimalAnddurasiCepat = new FuzzyRuleAntecedent();
+  ifkepekatanSangatpekatAndkeasamanOptimalAnddurasiCepat->joinWithAND(kepekatanSangatpekatAndkeasamanOptimal, cepat);
+  
+  FuzzyRuleConsequent* thenKondisiProses6 = new FuzzyRuleConsequent();
+  thenKondisiProses6->addOutput(proses);
+
+  FuzzyRule* fuzzyRule7 = new FuzzyRule(7,  ifkepekatanSangatpekatAndkeasamanOptimalAnddurasiCepat, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule7);
+  
+//rulebase 8
+  FuzzyRuleAntecedent* kepekatanSangatpekatAndkeasamanOptimal1 = new FuzzyRuleAntecedent();
+  kepekatanSangatpekatAndkeasamanOptimal1->joinWithAND(sangatpekat, optimal);
+
+  FuzzyRuleAntecedent* ifkepekatanSangatpekatAndkeasamanOptimalAnddurasiPas = new FuzzyRuleAntecedent();
+  ifkepekatanSangatpekatAndkeasamanOptimalAnddurasiPas->joinWithAND(kepekatanSangatpekatAndkeasamanOptimal1, pas);
+  
+  FuzzyRuleConsequent* thenKondisiBuang = new FuzzyRuleConsequent();
+  thenKondisiBuang->addOutput(buang);
+
+  FuzzyRule* fuzzyRule8 = new FuzzyRule(8,  ifkepekatanSangatpekatAndkeasamanOptimalAnddurasiPas, thenKondisiBuang);
+  fuzzy->addFuzzyRule(fuzzyRule8);
+
+//rulebase 9
+  FuzzyRuleAntecedent* kepekatanPekatAndkeasamanTinggi = new FuzzyRuleAntecedent();
+  kepekatanPekatAndkeasamanTinggi->joinWithAND(pekat, tinggi);
+
+  FuzzyRuleAntecedent* ifkepekatanPekatAndkeasamanTinggiAnddurasiCepat = new FuzzyRuleAntecedent();
+  ifkepekatanPekatAndkeasamanTinggiAnddurasiCepat->joinWithAND(kepekatanPekatAndkeasamanTinggi, cepat);
+  
+  FuzzyRuleConsequent* thenKondisiProses7 = new FuzzyRuleConsequent();
+  thenKondisiProses7->addOutput(proses);
+
+  FuzzyRule* fuzzyRule9 = new FuzzyRule(9,  ifkepekatanPekatAndkeasamanTinggiAnddurasiCepat, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule9);
+
+//rulebase 10
+  FuzzyRuleAntecedent* kepekatanPekatAndkeasamanTinggi1 = new FuzzyRuleAntecedent();
+  kepekatanPekatAndkeasamanTinggi1->joinWithAND(pekat, tinggi);
+
+  FuzzyRuleAntecedent* ifkepekatanPekatAndkeasamanTinggiAnddurasiPas = new FuzzyRuleAntecedent();
+  ifkepekatanPekatAndkeasamanTinggiAnddurasiPas->joinWithAND(kepekatanPekatAndkeasamanTinggi1, pas);
+  
+  FuzzyRuleConsequent* thenKondisiProses8 = new FuzzyRuleConsequent();
+  thenKondisiProses8->addOutput(proses);
+
+  FuzzyRule* fuzzyRule10 = new FuzzyRule(10,  ifkepekatanPekatAndkeasamanTinggiAnddurasiPas, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule10);
+
+//rulebase 11
+  FuzzyRuleAntecedent* kepekatanPekatAndkeasamanTinggi2 = new FuzzyRuleAntecedent();
+  kepekatanPekatAndkeasamanTinggi2->joinWithAND(pekat, tinggi);
+
+  FuzzyRuleAntecedent* ifkepekatanPekatAndkeasamanTinggiAnddurasiLama = new FuzzyRuleAntecedent();
+  ifkepekatanPekatAndkeasamanTinggiAnddurasiLama->joinWithAND(kepekatanPekatAndkeasamanTinggi2, lama);
+  
+  FuzzyRuleConsequent* thenKondisiProses9 = new FuzzyRuleConsequent();
+  thenKondisiProses9->addOutput(proses);
+
+  FuzzyRule* fuzzyRule11 = new FuzzyRule(11,  ifkepekatanPekatAndkeasamanTinggiAnddurasiLama, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule11);
+
+//rulebase 12
+  FuzzyRuleAntecedent* kepekatanPekatAndkeasamanRendah = new FuzzyRuleAntecedent();
+  kepekatanPekatAndkeasamanRendah->joinWithAND(pekat, rendah);
+
+  FuzzyRuleAntecedent* ifkepekatanPekatAndkeasamanRendahAnddurasiCepat = new FuzzyRuleAntecedent();
+  ifkepekatanPekatAndkeasamanRendahAnddurasiCepat->joinWithAND(kepekatanPekatAndkeasamanRendah, cepat);
+  
+  FuzzyRuleConsequent* thenKondisiProses10 = new FuzzyRuleConsequent();
+  thenKondisiProses10->addOutput(proses);
+
+  FuzzyRule* fuzzyRule12 = new FuzzyRule(12,  ifkepekatanPekatAndkeasamanRendahAnddurasiCepat, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule12);
+
+//rulebase 13
+  FuzzyRuleAntecedent* kepekatanPekatAndkeasamanRendah1 = new FuzzyRuleAntecedent();
+  kepekatanPekatAndkeasamanRendah1->joinWithAND(pekat, rendah);
+
+  FuzzyRuleAntecedent* ifkepekatanPekatAndkeasamanRendahAnddurasiPas = new FuzzyRuleAntecedent();
+  ifkepekatanPekatAndkeasamanRendahAnddurasiPas->joinWithAND(kepekatanPekatAndkeasamanRendah1, pas);
+  
+  FuzzyRuleConsequent* thenKondisiProses11 = new FuzzyRuleConsequent();
+  thenKondisiProses11->addOutput(proses);
+
+  FuzzyRule* fuzzyRule13 = new FuzzyRule(13,  ifkepekatanPekatAndkeasamanRendahAnddurasiPas, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule13);
+
+//rulebase 14
+  FuzzyRuleAntecedent* kepekatanPekatAndkeasamanRendah2 = new FuzzyRuleAntecedent();
+  kepekatanPekatAndkeasamanRendah2->joinWithAND(pekat, rendah);
+
+  FuzzyRuleAntecedent* ifkepekatanPekatAndkeasamanRendahAnddurasiLama = new FuzzyRuleAntecedent();
+  ifkepekatanPekatAndkeasamanRendahAnddurasiLama->joinWithAND(kepekatanPekatAndkeasamanRendah2, lama);
+  
+  FuzzyRuleConsequent* thenKondisiProses12 = new FuzzyRuleConsequent();
+  thenKondisiProses12->addOutput(proses);
+
+  FuzzyRule* fuzzyRule14 = new FuzzyRule(14,  ifkepekatanPekatAndkeasamanRendahAnddurasiLama, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule14);
+
+//rulebase 15
+  FuzzyRuleAntecedent* kepekatanPekatAndkeasamanOptimal = new FuzzyRuleAntecedent();
+  kepekatanPekatAndkeasamanOptimal->joinWithAND(pekat, optimal);
+
+  FuzzyRuleAntecedent* ifkepekatanPekatAndkeasamanOptimalAnddurasiCepat = new FuzzyRuleAntecedent();
+  ifkepekatanPekatAndkeasamanOptimalAnddurasiCepat->joinWithAND(kepekatanPekatAndkeasamanOptimal, cepat);
+  
+  FuzzyRuleConsequent* thenKondisiProses13 = new FuzzyRuleConsequent();
+  thenKondisiProses13->addOutput(proses);
+
+  FuzzyRule* fuzzyRule15 = new FuzzyRule(15,  ifkepekatanPekatAndkeasamanOptimalAnddurasiCepat, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule15);
+  
+//rulebase 16
+  FuzzyRuleAntecedent* kepekatanPekatAndkeasamanOptimal1 = new FuzzyRuleAntecedent();
+  kepekatanPekatAndkeasamanOptimal1->joinWithAND(pekat, optimal);
+
+  FuzzyRuleAntecedent* ifkepekatanPekatAndkeasamanOptimalAnddurasiPas = new FuzzyRuleAntecedent();
+  ifkepekatanPekatAndkeasamanOptimalAnddurasiPas->joinWithAND(kepekatanPekatAndkeasamanOptimal1, pas);
+  
+  FuzzyRuleConsequent* thenKondisiBuang1 = new FuzzyRuleConsequent();
+  thenKondisiBuang1->addOutput(buang);
+
+  FuzzyRule* fuzzyRule16 = new FuzzyRule(16,  ifkepekatanPekatAndkeasamanOptimalAnddurasiPas, thenKondisiBuang);
+  fuzzy->addFuzzyRule(fuzzyRule16);
+
+//rulebase 17
+  FuzzyRuleAntecedent* kepekatanBeningAndkeasamanTinggi = new FuzzyRuleAntecedent();
+  kepekatanBeningAndkeasamanTinggi->joinWithAND(bening, tinggi);
+
+  FuzzyRuleAntecedent* ifkepekatanBeningAndkeasamanTinggiAnddurasiCepat = new FuzzyRuleAntecedent();
+  ifkepekatanBeningAndkeasamanTinggiAnddurasiCepat->joinWithAND(kepekatanBeningAndkeasamanTinggi, cepat);
+  
+  FuzzyRuleConsequent* thenKondisiProses14 = new FuzzyRuleConsequent();
+  thenKondisiProses14->addOutput(proses);
+
+  FuzzyRule* fuzzyRule17 = new FuzzyRule(17,  ifkepekatanBeningAndkeasamanTinggiAnddurasiCepat, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule17);
+
+//rulebase 18
+  FuzzyRuleAntecedent* kepekatanBeningAndkeasamanTinggi1 = new FuzzyRuleAntecedent();
+  kepekatanBeningAndkeasamanTinggi1->joinWithAND(bening, tinggi);
+
+  FuzzyRuleAntecedent* ifkepekatanBeningAndkeasamanTinggiAnddurasiPas = new FuzzyRuleAntecedent();
+  ifkepekatanBeningAndkeasamanTinggiAnddurasiPas->joinWithAND(kepekatanBeningAndkeasamanTinggi1, pas);
+  
+  FuzzyRuleConsequent* thenKondisiProses15 = new FuzzyRuleConsequent();
+  thenKondisiProses15->addOutput(proses);
+
+  FuzzyRule* fuzzyRule18 = new FuzzyRule(18,  ifkepekatanBeningAndkeasamanTinggiAnddurasiPas, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule18); 
+
+//rulebase 19
+  FuzzyRuleAntecedent* kepekatanBeningAndkeasamanTinggi2 = new FuzzyRuleAntecedent();
+  kepekatanBeningAndkeasamanTinggi2->joinWithAND(bening, tinggi);
+
+  FuzzyRuleAntecedent* ifkepekatanBeningAndkeasamanTinggiAnddurasiLama = new FuzzyRuleAntecedent();
+  ifkepekatanBeningAndkeasamanTinggiAnddurasiLama->joinWithAND(kepekatanBeningAndkeasamanTinggi2, lama);
+  
+  FuzzyRuleConsequent* thenKondisiProses16 = new FuzzyRuleConsequent();
+  thenKondisiProses16->addOutput(proses);
+
+  FuzzyRule* fuzzyRule19 = new FuzzyRule(19,  ifkepekatanBeningAndkeasamanTinggiAnddurasiLama, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule19);
+
+//rulebase 20
+  FuzzyRuleAntecedent* kepekatanBeningAndkeasamanRendah = new FuzzyRuleAntecedent();
+  kepekatanBeningAndkeasamanRendah->joinWithAND(bening, rendah);
+
+  FuzzyRuleAntecedent* ifkepekatanBeningAndkeasamanRendahAnddurasiCepat = new FuzzyRuleAntecedent();
+  ifkepekatanBeningAndkeasamanRendahAnddurasiCepat->joinWithAND(kepekatanBeningAndkeasamanRendah, cepat);
+  
+  FuzzyRuleConsequent* thenKondisiProses17 = new FuzzyRuleConsequent();
+  thenKondisiProses17->addOutput(proses);
+
+  FuzzyRule* fuzzyRule20 = new FuzzyRule(20,  ifkepekatanBeningAndkeasamanRendahAnddurasiCepat, thenKondisiProses);
+  fuzzy->addFuzzyRule(fuzzyRule20);
+
+//rulebase 21
+  FuzzyRuleAntecedent* kepekatanBeningAndkeasamanRendah1 = new FuzzyRuleAntecedent();
+  kepekatanBeningAndkeasamanRendah1->joinWithAND(bening, rendah);
+
+  FuzzyRuleAntecedent* ifkepekatanBeningAndkeasamanRendahAnddurasiPas = new FuzzyRuleAntecedent();
+  ifkepekatanBeningAndkeasamanRendahAnddurasiPas->joinWithAND(kepekatanBeningAndkeasamanRendah1, pas);
+  
+  FuzzyRuleConsequent* thenKondisiBuang2 = new FuzzyRuleConsequent();
+  thenKondisiBuang2->addOutput(buang);
+
+  FuzzyRule* fuzzyRule21 = new FuzzyRule(21,  ifkepekatanBeningAndkeasamanRendahAnddurasiPas, thenKondisiBuang);
+  fuzzy->addFuzzyRule(fuzzyRule21);
+
+//rulebase 22
+  FuzzyRuleAntecedent* kepekatanBeningAndkeasamanOptimal = new FuzzyRuleAntecedent();
+  kepekatanBeningAndkeasamanOptimal->joinWithAND(bening, optimal);
+
+  FuzzyRuleAntecedent* ifkepekatanBeningAndkeasamanOptimalAnddurasiCepat = new FuzzyRuleAntecedent();
+  ifkepekatanBeningAndkeasamanOptimalAnddurasiCepat->joinWithAND(kepekatanBeningAndkeasamanOptimal, cepat);
+  
+  FuzzyRuleConsequent* thenKondisiBuang3 = new FuzzyRuleConsequent();
+  thenKondisiBuang3->addOutput(buang);
+
+  FuzzyRule* fuzzyRule22 = new FuzzyRule(22,  ifkepekatanBeningAndkeasamanOptimalAnddurasiCepat, thenKondisiBuang);
+  fuzzy->addFuzzyRule(fuzzyRule22);
+
+//rulebase 23
+  FuzzyRuleAntecedent* kepekatanSangatpekatAndkeasamanOptimal2 = new FuzzyRuleAntecedent();
+  kepekatanSangatpekatAndkeasamanOptimal2->joinWithAND(sangatpekat, optimal);
+
+  FuzzyRuleAntecedent* ifkepekatanSangatpekatAndkeasamanOptimalAnddurasiLama = new FuzzyRuleAntecedent();
+  ifkepekatanSangatpekatAndkeasamanOptimalAnddurasiLama->joinWithAND(kepekatanSangatpekatAndkeasamanOptimal, lama);
+  
+  FuzzyRuleConsequent* thenKondisiBuang4 = new FuzzyRuleConsequent();
+  thenKondisiBuang4->addOutput(buang);
+
+  FuzzyRule* fuzzyRule23 = new FuzzyRule(23,  ifkepekatanSangatpekatAndkeasamanOptimalAnddurasiLama, thenKondisiBuang);
+  fuzzy->addFuzzyRule(fuzzyRule23);
+
+//rulebase 24
+  FuzzyRuleAntecedent* kepekatanPekatAndkeasamanOptimal2 = new FuzzyRuleAntecedent();
+  kepekatanPekatAndkeasamanOptimal2->joinWithAND(pekat, optimal);
+
+  FuzzyRuleAntecedent* ifkepekatanPekatAndkeasamanOptimalAnddurasiLama = new FuzzyRuleAntecedent();
+  ifkepekatanPekatAndkeasamanOptimalAnddurasiLama->joinWithAND(kepekatanPekatAndkeasamanOptimal2, lama);
+  
+  FuzzyRuleConsequent* thenKondisiBuang5 = new FuzzyRuleConsequent();
+  thenKondisiBuang5->addOutput(buang);
+
+  FuzzyRule* fuzzyRule24 = new FuzzyRule(24,  ifkepekatanPekatAndkeasamanOptimalAnddurasiLama, thenKondisiBuang);
+  fuzzy->addFuzzyRule(fuzzyRule24);
+
+//rulebase 25
+  FuzzyRuleAntecedent* kepekatanBeningAndkeasamanRendah2 = new FuzzyRuleAntecedent();
+  kepekatanBeningAndkeasamanRendah2->joinWithAND(bening, rendah);
+
+  FuzzyRuleAntecedent* ifkepekatanBeningAndkeasamanRendahAnddurasiLama = new FuzzyRuleAntecedent();
+  ifkepekatanBeningAndkeasamanRendahAnddurasiLama->joinWithAND(kepekatanBeningAndkeasamanRendah1, lama);
+  
+  FuzzyRuleConsequent* thenKondisiBuang6 = new FuzzyRuleConsequent();
+  thenKondisiBuang6->addOutput(buang);
+
+  FuzzyRule* fuzzyRule25 = new FuzzyRule(25,  ifkepekatanBeningAndkeasamanRendahAnddurasiLama, thenKondisiBuang);
+  fuzzy->addFuzzyRule(fuzzyRule25);
+
+//rulebase 26
+  FuzzyRuleAntecedent* kepekatanBeningAndkeasamanOptimal1 = new FuzzyRuleAntecedent();
+  kepekatanBeningAndkeasamanOptimal1->joinWithAND(bening, optimal);
+
+  FuzzyRuleAntecedent* ifkepekatanBeningAndkeasamanOptimalAnddurasiPas = new FuzzyRuleAntecedent();
+  ifkepekatanBeningAndkeasamanOptimalAnddurasiPas->joinWithAND(kepekatanBeningAndkeasamanOptimal, pas);
+  
+  FuzzyRuleConsequent* thenKondisiBuang7 = new FuzzyRuleConsequent();
+  thenKondisiBuang7->addOutput(buang);
+
+  FuzzyRule* fuzzyRule26 = new FuzzyRule(26,  ifkepekatanBeningAndkeasamanOptimalAnddurasiPas, thenKondisiBuang);
+  fuzzy->addFuzzyRule(fuzzyRule26);
+
+//rulebase 27
+  FuzzyRuleAntecedent* kepekatanBeningAndkeasamanOptimal2 = new FuzzyRuleAntecedent();
+  kepekatanBeningAndkeasamanOptimal2->joinWithAND(bening, optimal);
+
+  FuzzyRuleAntecedent* ifkepekatanBeningAndkeasamanOptimalAnddurasiLama = new FuzzyRuleAntecedent();
+  ifkepekatanBeningAndkeasamanOptimalAnddurasiLama->joinWithAND(kepekatanBeningAndkeasamanOptimal, lama);
+  
+  FuzzyRuleConsequent* thenKondisiBuang8 = new FuzzyRuleConsequent();
+  thenKondisiBuang8->addOutput(buang);
+
+  FuzzyRule* fuzzyRule27 = new FuzzyRule(27,  ifkepekatanBeningAndkeasamanOptimalAnddurasiLama, thenKondisiBuang);
+  fuzzy->addFuzzyRule(fuzzyRule27);
+}
+
+//fungsi tutup keran servo
+void tutup(){
+  myservo.write(85);} //derajat kran untuk menutup
+
+//fungsi buka keran servo
+void buka(){
+  myservo.write(15);} //derajat kran untuk membuka
+
+//fungsi sampling pembacaan sensor pH
+void peha1(){
+  sensor=analogRead(SensorPin);
+  if(millis()-samplingTime > samplingInterval)
+  {
+      pHArray[pHArrayIndex++]=analogRead(SensorPin);
+      if(pHArrayIndex==ArrayLenth)pHArrayIndex=0;
+      voltage = avergearray(pHArray, ArrayLenth)*5.0/1024;
+      pHValue = 3.5*voltage+Offset;
+      samplingTime=millis();
+  }
+  if(millis() - printTime > printInterval)   //Every 800 milliseconds, print a numerical, convert the state of the LED indicator
+  {
+        Serial.print("Voltage:");
+        Serial.print(voltage);
+        Serial.print("    pH value: ");
+        Serial.print(pHValue,2);
+        Serial.print("    nilai serial: ");
+        Serial.println(sensor);
+        digitalWrite(LED,digitalRead(LED)^1);
+        printTime=millis();
+  }
+}
+double avergearray(int* arr, int number){
+  int i;
+  int max,min;
+  double avg;
+  long amount=0;
+  if(number<=0){
+    Serial.println("Error number for the array to avraging!/n");
+    return 0;
+  }
+  if(number<5){   //less than 5, calculated directly statistics
+    for(i=0;i<number;i++){
+      amount+=arr[i];
+    }
+    avg = amount/number;
+    return avg;
+  }else{
+    if(arr[0]<arr[1]){
+      min = arr[0];max=arr[1];
+    }
+    else{
+      min=arr[1];max=arr[0];
+    }
+    for(i=2;i<number;i++){
+      if(arr[i]<min){
+        amount+=min;        //arr<min
+        min=arr[i];
+      }else {
+        if(arr[i]>max){
+          amount+=max;    //arr>max
+          max=arr[i];
+        }else{
+          amount+=arr[i]; //min<=arr<=max
+        }
+      }//if
+    }//for
+    avg = (double)amount/(number-2);
+  }//if
+  return avg; 
+}
+
+
+void loop (){
+  //ucapan pembuka pada LCD
+  lcd.setCursor(0,0); lcd.print("==SISTEM FUZZY==");
+  lcd.setCursor(0,1); lcd.print("ELEKTROKOAGULASI"); delay(3000);
+  lcd.clear();
+
+  awalan:                                                         //proses isi bak elektrokoagulasi dilakukan sekali pertama alat dinyalakan
+  //mapping nilai sensor 
+  int Tair1 = analogRead(pta);  
+  Tair =map(Tair1, 0, 1023, 0, 1000);
+  digitalWrite(tx1, HIGH);digitalWrite(tx2, HIGH);
+  
+  //PROSES 1, AIR LIMBAH MASUK BAK ELEKTROKOAGULASI 
+  if(Tair > 0 && Tair <=ntx1){   //luar ruangan 500              //ada cahaya, air belum sampai ke set point
+    lcd.clear();
+    digitalWrite(pompa, HIGH); Serial.println("POMPA NYALA");
+    lcd.setCursor(0,0); lcd.print("PROSES AWAL");
+    lcd.setCursor(0,1); lcd.print("POMPA NYALA");delay(500);
+    goto awalan;
+    }
+  else if(Tair >ntx1 && Tair<=1023){  //dalam ruangan 600          //tak ada cahaya, air memenuhi set point
+    digitalWrite(pompa, LOW); Serial.println("POMPA MATI");
+    //goto fuzzy;
+    }
+
+  fuzzy:                                                           //proses fuzzy dilakukan iterasi
+  //PROSES 2, FUZZY  (penentuan kondisi proses/ buang)
+  //konversi nilai hasil baca sensor photodioda
+  int kepekatan = analogRead(ptb);
+  int kepekatan1 =map(kepekatan, 0,1023, 0, 999);
+  
+  //konversi nilai hasil baca sensor pH
+  float val = number();
+  float keasaman1 = val/100;
+  keasaman =map(keasaman1, 6.8, 9, 0, 1023); 
+
+   //konversi nilai hasil baca sensor RTC
+  DateTime now = rtc.now();           
+  int durasi1 = now.minute();
+  durasi =map(durasi1, 0, 25, 0, 1023);
+  Serial.print(durasi1);
+
+  //pemilihan variabel yang digunakan untuk input fuzzy
+  fuzzy->setInput(1, kepekatan);
+  fuzzy->setInput(2, keasaman);
+  fuzzy->setInput(3, durasi);
+
+  //serial print nilai fuzzifikasi tiap member function
+  fuzzy->fuzzify();
+  Serial.print(kepekatan);
+  Serial.print("   kepekatan: ");
+  Serial.print(sangatpekat->getPertinence());
+  Serial.print(", ");
+  Serial.print(pekat->getPertinence());
+  Serial.print(", ");
+  Serial.print(bening->getPertinence());
+  Serial.print("  ");
+
+  Serial.print(keasaman);
+  Serial.print("   keasaman: ");
+  Serial.print(optimal->getPertinence());
+  Serial.print(", ");
+  Serial.print(rendah->getPertinence());
+  Serial.print(", ");
+  Serial.print(tinggi->getPertinence());
+  Serial.print("  ");
+
+  Serial.print(durasi);
+  Serial.print("   durasi: ");
+  Serial.print(cepat->getPertinence());
+  Serial.print(", ");
+  Serial.print(pas->getPertinence());
+  Serial.print(", ");
+  Serial.print(lama->getPertinence());
+  Serial.print("  ");
+
+  //inisialisasi hasil defuzzi pada type data float
+  float output1 = fuzzy->defuzzify(1);
+
+  // serial print defuzzi
+  Serial.print("Defuzzy: ");
+  Serial.println(output1);
+  
+  eksekusi:                                                     //proses aksi dari hasil defuzzi
+  //kondisi PROSES
+  if(output1 >= 0 && output1 <= 511.5){ 
+    lcd.clear();
+    digitalWrite(rpsu, LOW); tutup();
+    lcd.setCursor(0,0);lcd.print("F=");
+    lcd.setCursor(2,0);lcd.print(output1);
+    lcd.setCursor(9,0);lcd.print("PROSES");
+    
+    bool b=1;
+    lcd.setCursor(0,b);lcd.write(1);lcd.setCursor(1,b);
+    lcd.print("=");lcd.setCursor(2,b);lcd.print(kepekatan1);
+    
+    lcd.setCursor(6,b);lcd.write(2);lcd.setCursor(7,b);
+    lcd.print("=");lcd.setCursor(8,b);lcd.print(keasaman1);
+    
+    lcd.setCursor(12,b);lcd.write(3);lcd.setCursor(13,b);
+    lcd.print("=");lcd.setCursor(14,b);lcd.print(durasi1);
+    
+    delay(x);
+    goto fuzzy;
+  }
+  
+  //kondisi BUANG
+  else if(output1 > 512.5 && output1 <= 1023){
+    lcd.clear();
+    digitalWrite(rpsu, HIGH); buka();
+    lcd.setCursor(0,0);lcd.print("F=");
+    lcd.setCursor(2,0);lcd.print(output1);
+    lcd.setCursor(9,0);lcd.print("BUANG");
+    
+    bool b=1;
+    lcd.setCursor(0,b);lcd.write(1);lcd.setCursor(1,b);
+    lcd.print("=");lcd.setCursor(2,b);lcd.print(kepekatan1);
+    
+    lcd.setCursor(6,b);lcd.write(2);lcd.setCursor(7,b);
+    lcd.print("=");lcd.setCursor(8,b);lcd.print(keasaman1);
+    
+    lcd.setCursor(12,b);lcd.write(3);lcd.setCursor(13,b);
+    lcd.print("=");lcd.setCursor(14,b);lcd.print(durasi1);
+    delay(x);
+    goto fuzzy;
+  }  
+}
