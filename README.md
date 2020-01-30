@@ -7,4 +7,4 @@ to use this program, you need to install library of:
 3. lcd 12c
 4. servo
 5. pH, from DFRobot.
-this program run in arduinno IDE.
+# this program run in arduinno IDE.
