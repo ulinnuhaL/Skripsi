@@ -52,6 +52,7 @@ int sensor;
   static unsigned long printTime = millis();
   static float pHValue,voltage;
 
+
 //Fuzzy Input
 Fuzzy* fuzzy = new Fuzzy();
 
@@ -92,7 +93,7 @@ void setup () {
   if (! rtc.begin()) {Serial.println("RTC TIDAK TERBACA");while (1);}
   if (! rtc.isrunning()) {Serial.println("RTC is NOT running!");
       rtc.adjust(DateTime(2019, 5, 19, 0, 0, 0)); /*set waktu manual*/}
-      
+
   // FuzzyInput kepekatan photodioda
   FuzzyInput* kepekatan = new FuzzyInput(1);
   kepekatan->addFuzzySet(sangatpekat);
@@ -546,7 +547,6 @@ double avergearray(int* arr, int number){
   return avg; 
 }
 
-
 void loop (){
   //ucapan pembuka pada LCD
   lcd.setCursor(0,0); lcd.print("==SISTEM FUZZY==");
@@ -576,17 +576,19 @@ void loop (){
   //PROSES 2, FUZZY  (penentuan kondisi proses/ buang)
   //konversi nilai hasil baca sensor photodioda
   int kepekatan = analogRead(ptb);
-  int kepekatan1 =map(kepekatan, 0,1023, 0, 999);
+  int kepekatan1 =map(kepekatan, 0,1023, 1, 999);
   
   //konversi nilai hasil baca sensor pH
-  float val = number();
-  float keasaman1 = val/100;
-  keasaman =map(keasaman1, 6.8, 9, 0, 1023); 
+  int keasaman1=pHValue;
+  keasaman =map(keasaman1, 6.8, 9, 1, 1023); 
 
    //konversi nilai hasil baca sensor RTC
-  DateTime now = rtc.now();           
-  int durasi1 = now.minute();
-  durasi =map(durasi1, 0, 25, 0, 1023);
+  DateTime now = rtc.now();
+  int durasipompa = now.minute();           
+  int durasi1 = durasipompa-5;
+  if (durasi1<0){durasi1=0;}
+  //int durasi1=now.minute();
+  durasi =map(durasi1, 0, 25, 1, 1023);
   Serial.print(durasi1);
 
   //pemilihan variabel yang digunakan untuk input fuzzy
